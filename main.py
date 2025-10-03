@@ -1,10 +1,14 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from model import BookStore
 from schemas import BookCreate, BookOut, Book
 from db import SessionLocal, base, engine
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
+from sqlalchemy import func
+import os
+import shutil
+from jose import jwt, JWTError
 
 #User
 from datetime import datetime,timedelta
@@ -12,16 +16,27 @@ from jose import JWTError, jwt
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from passlib.context import CryptContext
 from model import User
-from schemas import UserCreate, UserLogin, UserOut
+from schemas import UserCreate, UserLogin, UserOut, ForgotPasswordRequest, ResetPasswordRequest
 
 #Admin
-from schemas import AdminCreate, AdminLogin, AdminOut
-from model import Admin
+# from schemas import AdminCreate, AdminLogin, AdminOut
+# from model import Admin
 from functools import partial
 
 #Review
 from schemas import ReviewCreate, ReviewOut
 from model import Review
+
+#Update Profile
+from schemas import UserUpdate, UpdatePassword
+
+#Review
+from schemas import WiseListCreate, WiseListOut
+from model import WiseList
+
+#Review
+from schemas import CartCreate, CartOut
+from model import Cart
 
 SECRETE_KEY = 'your_secrete_key_12345'
 ALGORITHM = 'HS256'
@@ -50,8 +65,11 @@ def get_db():
     finally:
         db.close()
     
+    
+  
+    
+    
 #Users
-
 
 # Signup endpoint
 @app.post("/signup", response_model=UserOut, tags=["Users"])
@@ -84,7 +102,7 @@ def login(user: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(data={"sub": db_user.email, "role": "user"} , expires_delta=access_token_expires)
+    access_token = create_access_token(data={"sub": str(db_user.user_id), "role": "user"} , expires_delta=access_token_expires)
 
     # Verify password directly
     if not pwd_context.verify(user.password[:72], db_user.password):
@@ -92,11 +110,13 @@ def login(user: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 
     return {"message": f"Welcome {db_user.name}!", "access_token": access_token, "token_type": "bearer"}
 
+
 def create_access_token(data: dict, expires_delta: timedelta = None):
     to_encode = data.copy()
     expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
     to_encode.update({'exp': expire})
     return jwt.encode(to_encode, SECRETE_KEY, algorithm=ALGORITHM)
+
 
 def verify_access_token(token: str, credentials_exception):
     try:
@@ -108,40 +128,95 @@ def verify_access_token(token: str, credentials_exception):
     except JWTError:
         raise credentials_exception
     
+    
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail= 'could not valid credential',
         headers={"WWW-Authenticate": "Bearer"},
     )
-    email = verify_access_token(token , credentials_exception)
-    user = db.query(User).filter(User.email == email).first()
+    try:
+        payload = jwt.decode(token, SECRETE_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        role: str = payload.get("role")
+    except JWTError:
+        raise credentials_exception
+
+    if user_id is None or role != "user":
+        raise credentials_exception
+
+    user = db.query(User).filter(User.user_id == int(user_id)).first()
     if user is None:
         raise credentials_exception
     return user
 
 @app.get('/profile', tags=["Users"])
 def read_profile(current_user: User = Depends(get_current_user)):
-    return {"id": current_user.id, "name" : current_user.name, "email": current_user.email}
+    return {"id": current_user.user_id, "name" : current_user.name, "email": current_user.email}
+
+
+@app.post('/user/forgot-password', tags=['user'])
+def forgot_password(request : ForgotPasswordRequest, db : Session = Depends(get_db)):
+    user = db.query(User).filter(func.lower(User.email) == request.email.lower()).first()
+    if not user:
+        raise HTTPException(status_code=404, detail= "User not found...")
+    reset_token = create_access_token (
+        data={'sub': str(user.user_id), "role" : "user"},
+        expires_delta=timedelta(minutes = 15)
+    )
+    return{"Message": "Password reset token generated" , "reset_token": reset_token}
+
+
+@app.post('/user/reset-password', tags=['user'])
+def reset_password(request : ResetPasswordRequest, db : Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(request.token, SECRETE_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        role: str = payload.get("role")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    if role != "user":
+        raise HTTPException(status_code=401, detail="Invalid token role")
+
+    user = db.query(User).filter(User.user_id == int(user_id)).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="user not found...")
+    
+    if request.new_password != request.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+
+    # Hash new password and update
+    hashed_password = pwd_context.hash(request.new_password[:72])
+    user.password = hashed_password
+
+    db.commit()
+    db.refresh(user)
+
+    return {"message": "Password reset successfully"}
+
+
 
 
 
 #Admin
 
 # Signup endpoint
-@app.post("/admin/signup", response_model=AdminOut, tags=["Admins"])
-def signup(admin: AdminCreate, db: Session = Depends(get_db)):
-    existing_admin = db.query(Admin).filter(Admin.email == admin.email).first()
+@app.post("/admin/signup", response_model=UserOut, tags=["Admins"])
+def signup(admin: UserCreate, db: Session = Depends(get_db)):
+    existing_admin = db.query(User).filter(User.email == admin.email).first()
     if existing_admin:
         raise HTTPException(status_code=400, detail="Email already registered")
 
     # Hash password directly here (truncate to 72 chars to avoid bcrypt error)
     hashed_password = pwd_context.hash(admin.password[:72])
 
-    new_admin = Admin(
+    new_admin = User(
         name=admin.name,
         email=admin.email,
         password=hashed_password,
+        phone=admin.phone,
+        role='admin'
     )
     db.add(new_admin)
     db.commit()
@@ -152,15 +227,14 @@ def signup(admin: AdminCreate, db: Session = Depends(get_db)):
 # Login endpoint
 @app.post("/admin/login", tags=["Admins"])
 def login(admin: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    db_admin = db.query(Admin).filter(Admin.email == admin.username).first()
+    db_admin = db.query(User).filter(User.email == admin.username).first()
 
     if not db_admin or not pwd_context.verify(admin.password, db_admin.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(data={"sub": db_admin.email, "role": "admin"} , expires_delta=access_token_expires)
+    access_token = create_access_token(data={"sub": str(db_admin.user_id), "role": db_admin.role} , expires_delta=access_token_expires)
     
-
     # Verify password directly
     if not pwd_context.verify(admin.password[:72], db_admin.password):
         raise HTTPException(status_code=401, detail="Invalid Password")
@@ -171,21 +245,49 @@ def login(admin: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(ge
 def get_current_admin(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail= 'could not valid credential',
+        detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    email = verify_access_token(token , credentials_exception)
-    admin = db.query(Admin).filter(Admin.email == email).first()
-    if admin is None:
+
+    try:
+        payload = jwt.decode(token, SECRETE_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        role: str = payload.get("role")
+
+        if user_id is None or role != "admin":
+            raise credentials_exception
+
+        admin = db.query(User).filter(User.user_id == int(user_id), User.role == "admin").first()
+        if admin is None:
+            raise credentials_exception
+
+        return admin
+
+    except JWTError:  # Correct exception for python-jose
         raise credentials_exception
-    return admin
+    except jwt.ExpiredSignatureError:  # Optional: more descriptive
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 @app.get('/admin/profile', tags=["Admins"])
-def read_profile(current_admin: Admin = Depends(get_current_admin)):
-    return {"id": current_admin.admin_id, "name" : current_admin.name, "email": current_admin.email}
+def read_profile(current_admin: User = Depends(get_current_admin)):
+    return {
+        "id": current_admin.user_id,
+        "name": current_admin.name,
+        "email": current_admin.email,
+        "role": current_admin.role
+    }
+    
 
-
+@app.get('/admin/view-user', tags=["Admins"])
+def get_all_users(current_admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    users = db.query(User).filter(User.role == "User").all()
+    return users
+    
 
 
 
@@ -196,34 +298,61 @@ def read_profile(current_admin: Admin = Depends(get_current_admin)):
 def get_admin_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
+        detail="Not authorized to perform this action",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    payload = jwt.decode(token, SECRETE_KEY, algorithms=[ALGORITHM])
-    email: str = payload.get("sub")
-    role: str = payload.get("role")
-    
-    if email is None or role != "admin":
+
+    try:
+        payload = jwt.decode(token, SECRETE_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        role: str = payload.get("role")
+    except JWTError:
         raise credentials_exception
 
-    admin = db.query(Admin).filter(Admin.email == email).first()
+    if user_id is None or role != "admin":
+        raise credentials_exception
+
+    admin = db.query(User).filter(User.user_id == int(user_id), User.role == "admin").first()
     if admin is None:
         raise credentials_exception
+
     return admin
 
 
 @app.post("/books/admin/create", tags=["Authorization"])
 def create_book(
-    book: BookCreate,
+    title: str = Form(...),
+    auth_fname: str = Form(...),
+    auth_lname: str = Form(...),
+    rating: float = Form(...),
+    price: int = Form(...),
+    categories: str = Form(...),
+    stock: int = Form(...),
+    year: int = Form(...),
+    detail: str = Form(...),
+    image: UploadFile = File(None),
     db: Session = Depends(get_db),
-    current_admin: Admin = Depends(get_admin_user)  # <--- wrapper ensures admin role
+    current_admin: User = Depends(get_admin_user)  # <--- wrapper ensures admin role
 ):
+    
+    image_path = None
+    if image:
+        os.makedirs("uploads", exist_ok=True)
+        image_path = f"uploads/{image.filename}"
+        with open(image_path, "wb") as buffer:
+            shutil.copyfileobj(image.file, buffer)
+        
     new_book = BookStore(
-        title=book.title,
-        auth_fname=book.auth_fname,
-        auth_lname=book.auth_lname,
-        rating=book.rating,
-        price=book.price
+        title=title,
+        auth_fname=auth_fname,
+        auth_lname=auth_lname,
+        rating=rating,
+        price=price,
+        categories=categories,
+        stock=stock,
+        year=year,
+        detail=detail,
+        image=image_path
     )
     db.add(new_book)
     db.commit()
@@ -231,31 +360,57 @@ def create_book(
     return new_book
 
 
-
 @app.put("/books/admin/update/{book_id}", tags=["Authorization"])
 def update_book(
-    book_id : int,
-    book: BookCreate,
+    book_id: int,
+    title: str = Form(...),
+    auth_fname: str = Form(...),
+    auth_lname: str = Form(...),
+    rating: float = Form(...),
+    price: int = Form(...),
+    categories: str = Form(...),
+    stock: int = Form(...),
+    year: int = Form(...),
+    detail: str = Form(...),
+    image: UploadFile = File(None),
     db: Session = Depends(get_db),
-    current_admin: Admin = Depends(get_admin_user)  # <--- wrapper ensures admin role
+    current_admin: User = Depends(get_admin_user)
 ):
     db_book = db.query(BookStore).filter(BookStore.book_id == book_id).first()
     if not db_book:
-        raise HTTPException(status_code=404, detail="Book not Found...")
-    
-    for key, value in book.dict().items():
-        setattr(db_book, key, value)
-    
+        raise HTTPException(status_code=404, detail="Book not found.")
+
+    # Update all fields
+    db_book.title = title
+    db_book.auth_fname = auth_fname
+    db_book.auth_lname = auth_lname
+    db_book.rating = rating
+    db_book.price = price
+    db_book.categories = categories
+    db_book.stock = stock
+    db_book.year = year
+    db_book.detail = detail
+
+    # Handle optional image upload
+    if image:
+        os.makedirs("uploads", exist_ok=True)
+        image_path = f"uploads/{image.filename}"
+        with open(image_path, "wb") as buffer:
+            shutil.copyfileobj(image.file, buffer)
+        db_book.image = image_path
+
     db.commit()
     db.refresh(db_book)
     return db_book
+
+
     
        
 @app.delete("/books/admin/delete/{book_id}", tags=["Authorization"])
 def delete_book(
     book_id: int,
     db: Session = Depends(get_db),
-    current_admin: Admin = Depends(get_admin_user)  # wrapper ensures admin role
+    current_admin: User = Depends(get_admin_user)  # wrapper ensures admin role
 ):
     db_book = db.query(BookStore).filter(BookStore.book_id == book_id).first()
     if not db_book:
@@ -274,17 +429,16 @@ def get_user_access(token: str = Depends(oauth2_scheme), db: Session = Depends(g
         headers={"WWW-Authenticate": "Bearer"},
     )
     payload = jwt.decode(token, SECRETE_KEY, algorithms=[ALGORITHM])
-    email: str = payload.get("sub")
+    user_id: str = payload.get("sub")
     role: str = payload.get("role")
     
-    if email is None or role != "user":
+    if user_id is None or role != "user":
         raise credentials_exception
 
-    user = db.query(User).filter(User.email == email).first()
+    user = db.query(User).filter(User.user_id == int(user_id)).first()
     if user is None:
         raise credentials_exception
     return user
-
 
 
 @app.get("/user/books", response_model=List[BookOut], tags=["Authorization"])  # user can view
@@ -314,6 +468,7 @@ def create_review(review: ReviewCreate, db: Session = Depends(get_db), current_u
     db.refresh(new_review)
     return new_review
 
+
 @app.get("/books/{book_id}/reviews", response_model=List[ReviewOut], tags=["Review"])
 def get_book_reviews(book_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     db_book = db.query(BookStore).filter(BookStore.book_id == book_id).first()
@@ -323,47 +478,179 @@ def get_book_reviews(book_id: int, db: Session = Depends(get_db), current_user: 
 
 
 
-#Books 
 
-# @app.post('/create', tags=["Books"])
-# async def create_book(book: BookCreate, db: Session = Depends(get_db)):
-#     new_book = BookStore(
-#         title = book.title,
-#         auth_fname = book.auth_fname,
-#         auth_lname = book.auth_lname,
-#         rating = book.rating,
-#         price = book.price
-#     )
-#     db.add(new_book)
-#     db.commit()
-#     db.refresh(new_book)
-#     return new_book
+# Update Profile
 
-# @app.get('/books', response_model=List[BookOut], tags=["Books"])
-# async def books(db: Session = Depends(get_db)):
-#     books = db.query(BookStore).all()
-#     return books
+@app.put("/user/update/{user_id}", tags=["User"])
+def update_user(
+    user_id : int,
+    user: UserUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user) 
+):
+    db_user = db.query(User).filter(User.user_id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not Found...")
+    if current_user.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to update this user")
 
-# @app.put('/books/{book_id}', response_model=BookOut, tags=["Books"])
-# async def update_book(book_id : int, book: BookCreate, db: Session = Depends(get_db)):
-#     db_book = db.query(BookStore).filter(BookStore.book_id == book_id).first()
-#     if not db_book:
-#         raise HTTPException(status_code=404, detail="Book not Found...")
     
-#     for key, value in book.dict().items():
-#         setattr(db_book, key, value)
+    update_data = user.dict(exclude_unset=True)
     
-#     db.commit()
-#     db.refresh(db_book)
-#     return db_book
+    if "email" in update_data:
+        existing_user = db.query(User).filter(User.email == update_data["email"]).first()
+        if existing_user and existing_user.user_id != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already exists. Please choose a different email."
+            )
+            
+    for key, value in update_data.items():
+        if value is not None:
+            setattr(db_user, key, value)
+    
+    db.commit()
+    db.refresh(db_user)
+    return db_user
 
-# @app.delete('/books/{book_id}', tags=["Books"])
-# async def delete_book(book_id : int, db: Session = Depends(get_db)):
-#     db_book = db.query(BookStore).filter(BookStore.book_id == book_id).first()
-#     if not db_book:
-#         raise HTTPException(status_code=404, detail="Book not Found...")
+@app.put("/user/change-password", tags=["User"])
+def change_password(
+    passwords: UpdatePassword,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+
+    if not pwd_context.verify(passwords.last_password, current_user.password):
+        raise HTTPException(status_code=400, detail="Incorrect current password")
+
+    if passwords.new_password != passwords.confirm_password:
+        raise HTTPException(status_code=400, detail="New password and confirm password do not match")
+
+    hashed_new_password = pwd_context.hash(passwords.new_password[:72])
+    current_user.password = hashed_new_password
+
+    db.commit()
+    db.refresh(current_user)
+
+    return {"message": "Password updated successfully"}
+
+
+
+
+
+# WiseList
+
+@app.post("/user/{user_id}/wiselist", response_model=WiseListOut, tags=["WiseList"])
+def create_wiselist(wiselist: WiseListCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # Check if the book exists
+    db_book = db.query(BookStore).filter(BookStore.book_id == wiselist.book_id).first()
+    if not db_book:
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    # Check if the item is already in the wishlist (optional)
+    existing_item = db.query(WiseList).filter(
+        WiseList.user_id == current_user.user_id,
+        WiseList.book_id == wiselist.book_id
+    ).first()
+    if existing_item:
+        raise HTTPException(status_code=400, detail="Book already in wishlist")
+
+    # Create new wishlist item
+    new_wiselist = WiseList(
+        book_id=wiselist.book_id,
+        user_id=current_user.user_id
+    )
+    db.add(new_wiselist)
+    db.commit()
+    db.refresh(new_wiselist)
+    return new_wiselist
+
+
+@app.get("/user/{user_id}/wiselist", response_model=List[WiseListOut], tags=["WiseList"])
+def get_user_wiselist(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # Make sure the user exists
+    db_user = db.query(User).filter(User.user_id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Fetch all wishlist items for this user
+    wiselist_items = db.query(WiseList).filter(WiseList.user_id == user_id).all()
+
+    if not wiselist_items:
+        raise HTTPException(status_code=404, detail="No wishlist found for this user")
+
+    return wiselist_items
+
+@app.delete("/user/wiselist/delete/{wiselist_id}", tags=["WiseList"])
+def delete_wiselist(
+    wiselist_id: int,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_user)  # wrapper ensures admin role
+):
+    db_wiselist = db.query(WiseList).filter(WiseList.wiselist_id == wiselist_id).first()
+    if not db_wiselist:
+        raise HTTPException(status_code=404, detail="WiseList not Found...")
     
-#     db.delete(db_book)
-#     db.commit()
-#     return {'Message': f'Book with ID {book_id} deleted successfully'}
+    db.delete(db_wiselist)
+    db.commit()
+    return {"message": f"WiseList with ID {wiselist_id} deleted successfully"}
+
+
+
+# Cart
+
+@app.post("/user/{user_id}/cart", response_model=CartOut, tags=["Cart"])
+def create_cart(cart: CartCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # Check if the book exists
+    db_book = db.query(BookStore).filter(BookStore.book_id == cart.book_id).first()
+    if not db_book:
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    # Check if the item is already in the Cart (optional)
+    existing_item = db.query(Cart).filter(
+        Cart.user_id == current_user.user_id,
+        Cart.book_id == cart.book_id
+    ).first()
+    if existing_item:
+        raise HTTPException(status_code=400, detail="Book already in Cart")
+
+    # Create new Cart item
+    new_cart = Cart(
+        book_id=cart.book_id,
+        user_id=current_user.user_id
+    )
+    db.add(new_cart)
+    db.commit()
+    db.refresh(new_cart)
+    return new_cart
+
+
+@app.get("/user/{user_id}/cart", response_model=List[CartOut], tags=["Cart"])
+def get_user_cart(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # Make sure the user exists
+    db_user = db.query(User).filter(User.user_id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Fetch all Cart items for this user
+    cart_items = db.query(Cart).filter(Cart.user_id == user_id).all()
+
+    if not cart_items:
+        raise HTTPException(status_code=404, detail="No wishlist found for this user")
+
+    return cart_items
+
+
+@app.delete("/user/cart/delete/{cart_id}", tags=["Cart"])
+def delete_cart(
+    cart_id: int,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_user)  # wrapper ensures admin role
+):
+    db_cart = db.query(Cart).filter(Cart.cart_id == cart_id).first()
+    if not db_cart:
+        raise HTTPException(status_code=404, detail="Cart not Found...")
     
+    db.delete(db_cart)
+    db.commit()
+    return {"message": f"Cart with ID {cart_id} deleted successfully"}

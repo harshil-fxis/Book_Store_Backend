@@ -1,46 +1,45 @@
 from pydantic import BaseModel, EmailStr
 from typing import Optional
+from datetime import datetime
+
 
 #Books
 class BookCreate(BaseModel):
     title: str
-    auth_fname: str
-    auth_lname: str
+    author_name: str
     rating: float
     price: int
     
-    image: str
+    cover_photo: str
     categories: str
     stock: int
-    detail: str
-    year: int
+    description: str
+    publish_year: int
     
 class Book(BaseModel):
     title: str
-    auth_fname: str
-    auth_lname: str
+    author_name: str
     rating: float
     price: int
     
-    image: str
+    cover_photo: str
     categories: str
     stock: int
-    detail: str
-    year: int
+    description: str
+    publish_year: int
     
 
 class BookOut(BaseModel):
     title: str
-    auth_fname: str
-    auth_lname: str
+    author_name: str
     rating: float
     price: int
     
-    image: str
+    cover_photo: str
     categories: str
     stock: int
-    detail: str
-    year: int
+    description: str
+    publish_year: int
     
     model_config = {"from_attributes" : True}
   
@@ -133,29 +132,59 @@ class ResetPasswordRequest(BaseModel):
     
     
 #WiseList  
-class WiseListCreate(BaseModel):
-    book_id: int
-    user_id: int
+
+# class WiseListCreate(BaseModel):
+#     name: str
+#     is_default : Optional[str] = False
     
-class WiseListOut(BaseModel):
-    wiselist_id: int
-    book_id: int
-    user_id: int
+# class WiseListOut(BaseModel):
+#     id: int
+#     name: str
+#     is_default: bool
+#     created_at: datetime
+    
+#     class Config:
+#         orm_mode = True
+
+
+class FolderCreate(BaseModel):
+    name: str
+    
+class FolderOut(BaseModel):
+    id: int
+    name: str
+    is_default: bool
+    create_at: datetime
 
     model_config = {
         "from_attributes": True
     }
+
+
+
+        
+class ItemCreate(BaseModel):
+    book_id: Optional[int] = None
+    folder_id: Optional[int] = None
+    
+class ItemOut(BaseModel):
+    id: int
+    book_id: Optional[int]
+    folder_id: int
+    added_at: datetime
     
     
 #Cart  
 class CartCreate(BaseModel):
     book_id: int
     user_id: int
+    quantity: Optional[int] = 1
     
 class CartOut(BaseModel):
     cart_id: int
     book_id: int
     user_id: int
+    quantity: int
 
     model_config = {
         "from_attributes": True

@@ -30,11 +30,11 @@ from model import Review
 #Update Profile
 from schemas import UserUpdate, UpdatePassword
 
-#Review
-from schemas import WiseListCreate, WiseListOut
-from model import WiseList
+#WiseList
+from schemas import FolderCreate, FolderOut, ItemCreate, ItemOut
+from model import WishListFolder, WishListItem
 
-#Review
+#Cart
 from schemas import CartCreate, CartOut
 from model import Cart
 
@@ -322,37 +322,35 @@ def get_admin_user(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
 @app.post("/books/admin/create", tags=["Authorization"])
 def create_book(
     title: str = Form(...),
-    auth_fname: str = Form(...),
-    auth_lname: str = Form(...),
+    author_name: str = Form(...),
     rating: float = Form(...),
     price: int = Form(...),
     categories: str = Form(...),
     stock: int = Form(...),
-    year: int = Form(...),
-    detail: str = Form(...),
-    image: UploadFile = File(None),
+    publish_year: int = Form(...),
+    description: str = Form(...),
+    cover_photo: UploadFile = File(None),
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_admin_user)  # <--- wrapper ensures admin role
 ):
     
     image_path = None
-    if image:
+    if cover_photo:
         os.makedirs("uploads", exist_ok=True)
-        image_path = f"uploads/{image.filename}"
+        image_path = f"uploads/{cover_photo.filename}"
         with open(image_path, "wb") as buffer:
-            shutil.copyfileobj(image.file, buffer)
+            shutil.copyfileobj(cover_photo.file, buffer)
         
     new_book = BookStore(
         title=title,
-        auth_fname=auth_fname,
-        auth_lname=auth_lname,
+        author_name=author_name,
         rating=rating,
         price=price,
         categories=categories,
         stock=stock,
-        year=year,
-        detail=detail,
-        image=image_path
+        publish_year=publish_year,
+        description=description,
+        cover_photo=image_path
     )
     db.add(new_book)
     db.commit()
@@ -540,54 +538,144 @@ def change_password(
 
 # WiseList
 
-@app.post("/user/{user_id}/wiselist", response_model=WiseListOut, tags=["WiseList"])
-def create_wiselist(wiselist: WiseListCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    # Check if the book exists
-    db_book = db.query(BookStore).filter(BookStore.book_id == wiselist.book_id).first()
-    if not db_book:
-        raise HTTPException(status_code=404, detail="Book not found")
+# @app.post("/user/{user_id}/wiselist", response_model=WiseListOut, tags=["WiseList"])
+# def create_wiselist(wiselist: WiseListCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+#     # Check if the book exists
+#     db_book = db.query(BookStore).filter(BookStore.book_id == wiselist.book_id).first()
+#     if not db_book:
+#         raise HTTPException(status_code=404, detail="Book not found")
 
-    # Check if the item is already in the wishlist (optional)
-    existing_item = db.query(WiseList).filter(
-        WiseList.user_id == current_user.user_id,
-        WiseList.book_id == wiselist.book_id
-    ).first()
-    if existing_item:
-        raise HTTPException(status_code=400, detail="Book already in wishlist")
+#     # Check if the item is already in the wishlist (optional)
+#     existing_item = db.query(WiseList).filter(
+#         WiseList.user_id == current_user.user_id,
+#         WiseList.book_id == wiselist.book_id
+#     ).first()
+#     if existing_item:
+#         raise HTTPException(status_code=400, detail="Book already in wishlist")
 
-    # Create new wishlist item
-    new_wiselist = WiseList(
-        book_id=wiselist.book_id,
-        user_id=current_user.user_id
-    )
-    db.add(new_wiselist)
+#     # Create new wishlist item
+#     new_wiselist = WiseList(
+#         book_id=wiselist.book_id,
+#         user_id=current_user.user_id
+#     )
+#     db.add(new_wiselist)
+#     db.commit()
+#     db.refresh(new_wiselist)
+#     return new_wiselist
+
+
+# @app.get("/user/{user_id}/wiselist", response_model=List[WiseListOut], tags=["WiseList"])
+# def get_user_wiselist(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+#     # Make sure the user exists
+#     db_user = db.query(User).filter(User.user_id == user_id).first()
+#     if not db_user:
+#         raise HTTPException(status_code=404, detail="User not found")
+
+#     # Fetch all wishlist items for this user
+#     wiselist_items = db.query(WiseList).filter(WiseList.user_id == user_id).all()
+
+#     if not wiselist_items:
+#         raise HTTPException(status_code=404, detail="No wishlist found for this user")
+
+#     return wiselist_items
+
+# @app.delete("/user/wiselist/delete/{wiselist_id}", tags=["WiseList"])
+# def delete_wiselist(
+#     wiselist_id: int,
+#     db: Session = Depends(get_db),
+#     current_admin: User = Depends(get_current_user)  # wrapper ensures admin role
+# ):
+#     db_wiselist = db.query(WiseList).filter(WiseList.wiselist_id == wiselist_id).first()
+#     if not db_wiselist:
+#         raise HTTPException(status_code=404, detail="WiseList not Found...")
+    
+#     db.delete(db_wiselist)
+#     db.commit()
+#     return {"message": f"WiseList with ID {wiselist_id} deleted successfully"}
+
+def ensure_default_folder(db: Session, user: User):
+    default = db.query(WishListFolder).filter_by(user_id=user.user_id, is_default=True).first()
+    if default:
+        return default
+    
+    folder = db.query(WishListFolder).filter_by(user_id=user.user_id).first()
+    if not folder:
+        folder = WishListFolder(user_id= user.user_id, name='Default', is_default=True)
+        db.add(folder)
+        db.commit()
+        db.refresh(folder)
+        return folder
+    else:
+        folder.is_default = True
+        db.commit()
+        db.refresh(folder)
+        return folder
+    
+# @app.post("/users/{user_id}/folders", response_model=FolderOut, status_code=status.HTTP_201_CREATED)
+# def create_folder(user_id: int, payload: FolderCreate, db: Session = Depends(get_db)):
+#     user = db.query(User).get(user_id)
+#     if not user:
+#         raise HTTPException(status_code=404, detail="User not found")
+    
+#     folder = WishListFolder(user_id=user_id, name= payload.name, is_default=False)
+#     db.add(folder)
+#     db.commit()
+#     db.refresh(folder)
+#     return folder
+
+@app.post("/users/{user_id}/folders", response_model=FolderOut)
+def create_folder(user_id: int, payload: FolderCreate, db: Session = Depends(get_db),current_admin: User = Depends(get_current_user) ):
+    folder = WishListFolder(user_id=user_id, name=payload.name, is_default=False)
+    db.add(folder)
     db.commit()
-    db.refresh(new_wiselist)
-    return new_wiselist
+    db.refresh(folder)
+    return folder
 
 
-@app.get("/user/{user_id}/wiselist", response_model=List[WiseListOut], tags=["WiseList"])
-def get_user_wiselist(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    # Make sure the user exists
-    db_user = db.query(User).filter(User.user_id == user_id).first()
-    if not db_user:
+@app.get("/user/{user_id}/folders", response_model=List[FolderOut])
+def list_folder(user_id: int , db: Session = Depends(get_db), current_admin: User = Depends(get_current_user)):
+    user = db.query(User).get(user_id)
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    folders = db.query(WishListFolder).filter_by(user_id=user_id).order_by(WishListFolder.create_at).all()
+    return folders
 
-    # Fetch all wishlist items for this user
-    wiselist_items = db.query(WiseList).filter(WiseList.user_id == user_id).all()
 
-    if not wiselist_items:
-        raise HTTPException(status_code=404, detail="No wishlist found for this user")
+@app.post("/users/{user_id}/wishlist", response_model=ItemOut, status_code=(status.HTTP_201_CREATED))
+def add_wishlist_item(user_id : int, payload: ItemCreate, db: Session = Depends(get_db),current_admin: User = Depends(get_current_user) ):
+    user = db.query(User).get(user_id)
+    folder = db.query(WishListFolder).get(payload.folder_id)
+    book = db.query(BookStore).get(payload.book_id)
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+    
+    item = WishListItem(user_id = user_id, folder_id = payload.folder_id, book_id = payload.book_id)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
 
-    return wiselist_items
+@app.get("/user/{user_id}/wishlist", response_model=List[ItemOut])
+def get_wishlist_items(user_id : int, db: Session = Depends(get_db),current_admin: User = Depends(get_current_user) ):
+    user = db.query(User).get(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    item= db.query(WishListItem).filter_by(user_id=user_id).all()
+    return item
 
-@app.delete("/user/wiselist/delete/{wiselist_id}", tags=["WiseList"])
+
+@app.delete("/user/wiselist/delete/{wiselist_id}")
 def delete_wiselist(
     wiselist_id: int,
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_current_user)  # wrapper ensures admin role
 ):
-    db_wiselist = db.query(WiseList).filter(WiseList.wiselist_id == wiselist_id).first()
+    db_wiselist = db.query(WishListItem).filter(WishListItem.id == wiselist_id).first()
     if not db_wiselist:
         raise HTTPException(status_code=404, detail="WiseList not Found...")
     
@@ -596,33 +684,62 @@ def delete_wiselist(
     return {"message": f"WiseList with ID {wiselist_id} deleted successfully"}
 
 
-
 # Cart
 
-@app.post("/user/{user_id}/cart", response_model=CartOut, tags=["Cart"])
-def create_cart(cart: CartCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    # Check if the book exists
-    db_book = db.query(BookStore).filter(BookStore.book_id == cart.book_id).first()
-    if not db_book:
+# @app.post("/user/{user_id}/cart", response_model=CartOut, tags=["Cart"])
+# def create_cart(cart: CartCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+#     # Check if the book exists
+#     db_book = db.query(BookStore).filter(BookStore.book_id == cart.book_id).first()
+#     if not db_book:
+#         raise HTTPException(status_code=404, detail="Book not found")
+
+#     # Check if the item is already in the Cart (optional)
+#     existing_item = db.query(Cart).filter(
+#         Cart.user_id == current_user.user_id,
+#         Cart.book_id == cart.book_id
+#     ).first()
+#     if existing_item:
+#         raise HTTPException(status_code=400, detail="Book already in Cart")
+
+#     # Create new Cart item
+#     new_cart = Cart(
+#         book_id=cart.book_id,
+#         user_id=current_user.user_id
+#     )
+#     db.add(new_cart)
+#     db.commit()
+#     db.refresh(new_cart)
+#     return new_cart
+
+@app.post("/users/{user_id}/cart", response_model=CartOut, status_code=status.HTTP_201_CREATED,  tags=["Cart"])
+def add_to_cart(user_id: int, payload: CartCreate, db: Session = Depends(get_db)):
+    user = db.query(User).get(user_id)
+    book = db.query(BookStore).get(payload.book_id)
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not book:
         raise HTTPException(status_code=404, detail="Book not found")
+    
+    existing_cart_item = db.query(Cart).filter_by(user_id=user_id, book_id=payload.book_id).first()
+    
+    if existing_cart_item:
+        existing_cart_item.quantity += payload.quantity
+        db.commit()
+        db.refresh(existing_cart_item)
+        return existing_cart_item
+    
 
-    # Check if the item is already in the Cart (optional)
-    existing_item = db.query(Cart).filter(
-        Cart.user_id == current_user.user_id,
-        Cart.book_id == cart.book_id
-    ).first()
-    if existing_item:
-        raise HTTPException(status_code=400, detail="Book already in Cart")
-
-    # Create new Cart item
-    new_cart = Cart(
-        book_id=cart.book_id,
-        user_id=current_user.user_id
+    new_cart_item = Cart(
+        user_id=user_id,
+        book_id=payload.book_id,
+        quantity=payload.quantity or 1
     )
-    db.add(new_cart)
+    db.add(new_cart_item)
     db.commit()
-    db.refresh(new_cart)
-    return new_cart
+    db.refresh(new_cart_item)
+    return new_cart_item
+
 
 
 @app.get("/user/{user_id}/cart", response_model=List[CartOut], tags=["Cart"])
@@ -654,3 +771,7 @@ def delete_cart(
     db.delete(db_cart)
     db.commit()
     return {"message": f"Cart with ID {cart_id} deleted successfully"}
+
+
+
+
